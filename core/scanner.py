@@ -6,20 +6,25 @@ from .models import LocalFile
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv", ".mov", ".m4v"}
 
 def parse_performers_from_filename(filename: str) -> List[str]:
-    """
-    Very basic parser. Adjust to match how your files are currently named.
-    Examples it tries to handle:
-      - "Angela White.mp4"
-      - "Angela White, Xander Corvus.mp4"
-      - "Angela White & Mick Blue.mp4"
-    """
-    stem = Path(filename).stem
-    # Remove common studio prefixes if present
-    stem = re.sub(r"^(Brazzers|ZZ|Hot and Mean)[\s\-_]+", "", stem, flags=re.I)
+    stem = Path(filename).stem.lower().strip()
 
-    # Split on common separators
+    # Remove common junk
+    junk_patterns = [
+        r"\blc\b", r"\bp\b", r"\bhd\b", r"\b4k\b", r"\b1080p\b", r"\b720p\b",
+        r"\bfull\b", r"\bscene\b", r"\bxxx\b"
+    ]
+    for j in junk_patterns:
+        stem = re.sub(j, " ", stem)
+
+    stem = re.sub(r"[_\-\.]+", " ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+
     parts = re.split(r"[,&+]|\band\b", stem, flags=re.I)
-    performers = [p.strip() for p in parts if p.strip()]
+    performers = []
+    for p in parts:
+        p = p.strip()
+        if len(p) > 2:
+            performers.append(p.title())
     return performers
 
 def scan_folder(folder: Path, recursive: bool = True) -> List[LocalFile]:
