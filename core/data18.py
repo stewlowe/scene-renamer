@@ -54,7 +54,20 @@ def slugify_performer(name: str) -> str:
 
 def parse_date(text: str) -> Optional[str]:
     text = text.strip()
-    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %Y", "%b %Y", "%Y-%m-%d", "%d %B %Y"):
+    # Clean common extra text
+    text = re.sub(r"(Release date|Released|Date)[:\s]*", "", text, flags=re.I)
+    text = text.strip(" .,-")
+
+    for fmt in (
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %Y",
+        "%b %Y",
+        "%Y-%m-%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%m/%d/%Y",
+    ):
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -110,21 +123,36 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
                 scene_url = href if href.startswith("http") else DATA18_BASE + href
                 scene_id = href.rstrip("/").split("/")[-1]
 
-                # Get surrounding text to detect series
+                # Get surrounding text for series + date
                 parent_text = ""
-                if a.parent:
-                    parent_text = a.parent.text()
-                # Also check grandparent for more context
-                if a.parent and a.parent.parent:
-                    parent_text += " " + a.parent.parent.text()
+                current = a.parent
+                for _ in range(4):  # go up a few levels for more context
+                    if current is None:
+                        break
+                    parent_text += " " + current.text()
+                    current = current.parent
 
                 series = detect_series(parent_text)
+
+                # Try to find a date in the surrounding text
+                date = None
+                # Look for common date patterns in the parent text
+                date_match = re.search(
+                    r"((?:January|February|March|April|May|June|July|August|September|October|November|December|"
+                    r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})"
+                    r"|(\d{4}-\d{2}-\d{2})"
+                    r"|(\d{1,2}/\d{1,2}/\d{4})",
+                    parent_text,
+                    re.I
+                )
+                if date_match:
+                    date = parse_date(date_match.group(0))
 
                 scenes.append(
                     SceneCandidate(
                         scene_id=scene_id,
                         title=title,
-                        date=None,
+                        date=date,
                         series=series,
                         url=scene_url,
                         performers=[performer],
