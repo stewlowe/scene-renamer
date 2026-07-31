@@ -1,181 +1,139 @@
+import asyncio
+from pathlib import Path
 import httpx
-from selectolax.parser import HTMLParser
-from typing import List, Optional
-import re
-from datetime import datetime
-from .models import SceneCandidate
-from config import DATA18_BASE, USER_AGENT
+from rich.console import Console
+from rich.table import Table
+from rich.prompt import Prompt, Confirm
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-}
+from core.scanner import scan_folder
+from core.data18 import fetch_performer_brazzers_scenes
+from core.renamer import generate_filename, apply_rename
+from core.models import MatchResult
 
-COOKIES = {
-    "data_user_captcha": "1"
-}
+console = Console()
 
-KNOWN_SITES = [
-    "Baby Got Boobs",
-    "Big Wet Butts",
-    "Brazzers Exxtra",
-    "Hot and Mean",
-    "Doctor Adventures",
-    "Dirty Masseur",
-    "Big Tits at School",
-    "Big Tits at Work",
-    "ZZ Series",
-    "Pornstars Like It Big",
-    "Real Wife Stories",
-    "Moms in Control",
-    "Teens Like It Big",
-    "Milfs Like It Big",
-    "Big Tits in Uniform",
-    "Big Tits in Sports",
-    "Asses in Public",
-    "Day With A Pornstar",
-    "Brazzers Vault",
-]
+async def main():
+    folder = Path(input("Enter folder path to scan: ").strip('" '))
+    if not folder.exists():
+        console.print("[red]Folder does not exist[/red]")
+        return
 
-def slugify_performer(name: str) -> str:
-    slug = name.lower().strip()
-    slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = re.sub(r"[\s_]+", "-", slug)
-    return slug.strip("-")
+    files = scan_folder(folder)
+    console.print(f"\nFound {len(files)} video files\n")
 
-def parse_date(text: str) -> Optional[str]:
-    text = text.strip()
-    # Clean common extra text
-    text = re.sub(r"(Release date|Released|Date)[:\s]*", "", text, flags=re.I)
-    text = text.strip(" .,-")
+    # Group by first performer
+    performers = {}
+    for f in files:
+        if f.performers:
+            key = f.performers[0]
+            performers.setdefault(key, []).append(f)
 
-    for fmt in (
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%B %Y",
-        "%b %Y",
-        "%Y-%m-%d",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%m/%d/%Y",
-    ):
-        try:
-            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
+    matches: list[MatchResult] = []
 
-def detect_series(text: str) -> str:
-    text_lower = text.lower()
-    for site in KNOWN_SITES:
-        if site.lower() in text_lower:
-            return site
-    return "Brazzers"
+    async with httpx.AsyncClient() as client:
+        for performer, file_list in performers.items():
+            console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
+            console.print(f"[bold cyan]Performer: {performer}[/bold cyan] ({len(file_list)} files)")
+            console.print(f"[bold cyan]{'='*60}[/bold cyan]")
 
-async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncClient) -> List[SceneCandidate]:
-    slug = slugify_performer(performer)
+            scenes = await fetch_performer_brazzers_scenes(performer, client)
+            console.print(f"Found {len(scenes)} Brazzers scenes on data18\n")
 
-    urls_to_try = [
-        f"{DATA18_BASE}/name/{slug}/studios-brazzers",
-        f"{DATA18_BASE}/name/{slug}",
-    ]
-
-    scenes: List[SceneCandidate] = []
-
-    for url in urls_to_try:
-        try:
-            print(f"  Trying: {url}")
-            resp = await client.get(
-                url,
-                headers=HEADERS,
-                cookies=COOKIES,
-                follow_redirects=True,
-                timeout=25.0
-            )
-
-            print(f"  → Status {resp.status_code}")
-
-            if resp.status_code != 200:
+            if not scenes:
+                for f in file_list:
+                    matches.append(MatchResult(local_file=f, status="no_scenes"))
                 continue
 
-            tree = HTMLParser(resp.text)
+            # Show candidates once for this performer
+            table = Table(title=f"Candidates for {performer}")
+            table.add_column("#", style="cyan", width=4)
+            table.add_column("Date", width=12)
+            table.add_column("Series", width=22)
+            table.add_column("Title")
 
-            for a in tree.css("a[href*='/scenes/']"):
-                href = a.attributes.get("href", "")
-                title = a.text(strip=True)
+            for idx, s in enumerate(scenes, 1):
+                table.add_row(
+                    str(idx),
+                    s.date or "?",
+                    s.series,
+                    s.title[:55]
+                )
+            console.print(table)
+            console.print()
 
-                if not title or len(title) < 5:
-                    continue
+            # Now go through each file for this performer
+            for f in file_list:
+                console.print(f"[bold yellow]File:[/bold yellow] {f.current_name}")
+                console.print(f"Performers detected: {', '.join(f.performers)}")
 
-                lower_title = title.lower()
-                if any(x in lower_title for x in ["next", "prev", "page", "more results", "all scenes", "show more"]):
-                    continue
+                while True:
+                    choice = Prompt.ask(
+                        "Enter number of matching scene (or 's' to skip, 'q' to quit)",
+                        default="s"
+                    ).strip().lower()
 
-                scene_url = href if href.startswith("http") else DATA18_BASE + href
-                scene_id = href.rstrip("/").split("/")[-1]
-
-                # Get surrounding text for series + date
-                parent_text = ""
-                current = a.parent
-                for _ in range(4):  # go up a few levels for more context
-                    if current is None:
+                    if choice == "q":
+                        console.print("[red]Quitting...[/red]")
+                        return
+                    if choice == "s":
+                        matches.append(MatchResult(local_file=f, status="skipped"))
+                        console.print("[dim]Skipped[/dim]\n")
                         break
-                    parent_text += " " + current.text()
-                    current = current.parent
 
-                series = detect_series(parent_text)
+                    try:
+                        num = int(choice)
+                        if 1 <= num <= len(scenes):
+                            selected = scenes[num - 1]
+                            new_name = generate_filename(selected)
 
-                # Try to find a date in the surrounding text
-                date = None
-                # Look for common date patterns in the parent text
-                date_match = re.search(
-                    r"((?:January|February|March|April|May|June|July|August|September|October|November|December|"
-                    r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})"
-                    r"|(\d{4}-\d{2}-\d{2})"
-                    r"|(\d{1,2}/\d{1,2}/\d{4})",
-                    parent_text,
-                    re.I
-                )
-                if date_match:
-                    date = parse_date(date_match.group(0))
+                            console.print(f"\n[green]Selected:[/green] {selected.title}")
+                            console.print(f"[green]New name:[/green] {new_name}")
 
-                scenes.append(
-                    SceneCandidate(
-                        scene_id=scene_id,
-                        title=title,
-                        date=date,
-                        series=series,
-                        url=scene_url,
-                        performers=[performer],
-                    )
-                )
+                            confirm = Confirm.ask("Confirm this match?", default=True)
+                            if confirm:
+                                matches.append(
+                                    MatchResult(
+                                        local_file=f,
+                                        matched_scene=selected,
+                                        new_filename=new_name,
+                                        status="matched"
+                                    )
+                                )
+                                console.print("[bold green]Matched![/bold green]\n")
+                                break
+                            else:
+                                console.print("[dim]Okay, choose again[/dim]")
+                        else:
+                            console.print("[red]Number out of range[/red]")
+                    except ValueError:
+                        console.print("[red]Please enter a number, 's', or 'q'[/red]")
 
-            # Remove duplicates
-            seen = set()
-            unique = []
-            for s in scenes:
-                if s.scene_id not in seen:
-                    seen.add(s.scene_id)
-                    unique.append(s)
-            scenes = unique
+    # Summary
+    console.print(f"\n[bold]{'='*60}[/bold]")
+    console.print("[bold]MATCHING SUMMARY[/bold]")
+    console.print(f"[bold]{'='*60}[/bold]")
 
-            if scenes:
-                print(f"  → Found {len(scenes)} scenes")
-                break
-            else:
-                print(f"  → No usable scene links found")
+    matched = [m for m in matches if m.status == "matched"]
+    skipped = [m for m in matches if m.status == "skipped"]
+    no_scenes = [m for m in matches if m.status == "no_scenes"]
 
-        except Exception as e:
-            print(f"  → Error: {e}")
-            continue
+    console.print(f"Matched : {len(matched)}")
+    console.print(f"Skipped : {len(skipped)}")
+    console.print(f"No scenes found: {len(no_scenes)}")
 
-    return scenes
+    if matched:
+        console.print("\n[bold]Pending renames:[/bold]")
+        for m in matched:
+            console.print(f"  {m.local_file.current_name}")
+            console.print(f"  → {m.new_filename}\n")
+
+        do_rename = Confirm.ask("\nApply these renames now?", default=False)
+        if do_rename:
+            for m in matched:
+                apply_rename(m.local_file, m.new_filename, dry_run=False)
+            console.print("\n[bold green]Renames applied![/bold green]")
+        else:
+            console.print("\n[dim]No files were renamed (dry run).[/dim]")
+
+if __name__ == "__main__":
+    asyncio.run(main())
