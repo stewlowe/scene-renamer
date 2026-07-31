@@ -1,43 +1,35 @@
 import httpx
 from selectolax.parser import HTMLParser
 from typing import List, Optional
-from urllib.parse import quote
-from .models import SceneCandidate
-from config import DATA18_BASE, USER_AGENT
 import re
 from datetime import datetime
+from .models import SceneCandidate
+from config import DATA18_BASE, USER_AGENT
 
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 def slugify_performer(name: str) -> str:
-    """Turn 'Angela White' into 'angela-white'"""
     slug = name.lower().strip()
     slug = re.sub(r"[^\w\s-]", "", slug)
     slug = re.sub(r"[\s_]+", "-", slug)
     return slug.strip("-")
 
 def parse_date(text: str) -> Optional[str]:
-    """Try to normalise various date formats to YYYY-MM-DD"""
     text = text.strip()
-    # Common patterns on data18
-    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %Y", "%b %Y", "%Y-%m-%d"):
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %Y", "%b %Y", "%Y-%m-%d", "%d %B %Y"):
         try:
-            dt = datetime.strptime(text, fmt)
-            return dt.strftime("%Y-%m-%d")
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    # Fallback: just return cleaned text
-    return text or None
+    return None
 
 async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncClient) -> List[SceneCandidate]:
-    """
-    Fetch Brazzers scenes for a performer.
-    Tries the filtered studio page first, falls back to main performer page.
-    """
     slug = slugify_performer(performer)
+
     urls_to_try = [
         f"{DATA18_BASE}/name/{slug}/studios-brazzers",
         f"{DATA18_BASE}/name/{slug}",
@@ -47,52 +39,75 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
 
     for url in urls_to_try:
         try:
-            resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=20.0)
+            print(f"  Trying: {url}")
+            resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=25.0)
+
             if resp.status_code != 200:
+                print(f"  → Status {resp.status_code}")
                 continue
 
             tree = HTMLParser(resp.text)
 
-            # data18 scene list items vary a bit; this targets the common pattern
-            # You will almost certainly need to tweak the selectors after testing
-            for item in tree.css("div.scene, div.list-item, div[id^='scene']"):
-                title_el = item.css_first("a[href*='/scenes/']")
-                if not title_el:
+            # Look for any link that points to a scene
+            for a in tree.css("a[href*='/scenes/']"):
+                href = a.attributes.get("href", "")
+                title = a.text(strip=True)
+
+                if not title or len(title) < 5:
                     continue
 
-                title = title_el.text(strip=True)
-                href = title_el.attributes.get("href", "")
+                # Skip obvious non-scene links
+                lower_title = title.lower()
+                if any(x in lower_title for x in ["next", "prev", "page", "more results", "all scenes", "show more"]):
+                    continue
+
                 scene_url = href if href.startswith("http") else DATA18_BASE + href
                 scene_id = href.rstrip("/").split("/")[-1]
 
-                # Series / site
+                # Try to detect the series/site
                 series = "Brazzers"
-                series_el = item.css_first("a[href*='studios'], span.site, div.site")
-                if series_el:
-                    series = series_el.text(strip=True)
+                parent_text = ""
+                if a.parent:
+                    parent_text = a.parent.text()
 
-                # Date
-                date = None
-                date_el = item.css_first("span.date, div.date, time")
-                if date_el:
-                    date = parse_date(date_el.text(strip=True))
+                for site in [
+                    "Baby Got Boobs", "Big Wet Butts", "Brazzers Exxtra",
+                    "Hot and Mean", "Doctor Adventures", "Dirty Masseur",
+                    "Big Tits at School", "Big Tits at Work", "ZZ Series",
+                    "Pornstars Like It Big", "Real Wife Stories", "Moms in Control"
+                ]:
+                    if site.lower() in parent_text.lower():
+                        series = site
+                        break
 
                 scenes.append(
                     SceneCandidate(
                         scene_id=scene_id,
                         title=title,
-                        date=date,
+                        date=None,          # we improve date later
                         series=series,
                         url=scene_url,
                         performers=[performer],
                     )
                 )
 
+            # Remove duplicates
+            seen = set()
+            unique = []
+            for s in scenes:
+                if s.scene_id not in seen:
+                    seen.add(s.scene_id)
+                    unique.append(s)
+            scenes = unique
+
             if scenes:
-                break  # success
+                print(f"  → Found {len(scenes)} scenes")
+                break
+            else:
+                print(f"  → No usable scene links found")
 
         except Exception as e:
-            print(f"[data18] Error fetching {url}: {e}")
+            print(f"  → Error: {e}")
             continue
 
     return scenes
