@@ -20,10 +20,31 @@ HEADERS = {
     "Cache-Control": "max-age=0",
 }
 
-# Cookie that many data18 scrapers use
 COOKIES = {
     "data_user_captcha": "1"
 }
+
+KNOWN_SITES = [
+    "Baby Got Boobs",
+    "Big Wet Butts",
+    "Brazzers Exxtra",
+    "Hot and Mean",
+    "Doctor Adventures",
+    "Dirty Masseur",
+    "Big Tits at School",
+    "Big Tits at Work",
+    "ZZ Series",
+    "Pornstars Like It Big",
+    "Real Wife Stories",
+    "Moms in Control",
+    "Teens Like It Big",
+    "Milfs Like It Big",
+    "Big Tits in Uniform",
+    "Big Tits in Sports",
+    "Asses in Public",
+    "Day With A Pornstar",
+    "Brazzers Vault",
+]
 
 def slugify_performer(name: str) -> str:
     slug = name.lower().strip()
@@ -39,6 +60,13 @@ def parse_date(text: str) -> Optional[str]:
         except ValueError:
             continue
     return None
+
+def detect_series(text: str) -> str:
+    text_lower = text.lower()
+    for site in KNOWN_SITES:
+        if site.lower() in text_lower:
+            return site
+    return "Brazzers"
 
 async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncClient) -> List[SceneCandidate]:
     slug = slugify_performer(performer)
@@ -82,20 +110,15 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
                 scene_url = href if href.startswith("http") else DATA18_BASE + href
                 scene_id = href.rstrip("/").split("/")[-1]
 
-                series = "Brazzers"
+                # Get surrounding text to detect series
                 parent_text = ""
                 if a.parent:
                     parent_text = a.parent.text()
+                # Also check grandparent for more context
+                if a.parent and a.parent.parent:
+                    parent_text += " " + a.parent.parent.text()
 
-                for site in [
-                    "Baby Got Boobs", "Big Wet Butts", "Brazzers Exxtra",
-                    "Hot and Mean", "Doctor Adventures", "Dirty Masseur",
-                    "Big Tits at School", "Big Tits at Work", "ZZ Series",
-                    "Pornstars Like It Big", "Real Wife Stories", "Moms in Control"
-                ]:
-                    if site.lower() in parent_text.lower():
-                        series = site
-                        break
+                series = detect_series(parent_text)
 
                 scenes.append(
                     SceneCandidate(
