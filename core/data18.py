@@ -7,9 +7,22 @@ from .models import SceneCandidate
 from config import DATA18_BASE, USER_AGENT
 
 HEADERS = {
-    "User-Agent": USER_AGENT,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+# Cookie that many data18 scrapers use
+COOKIES = {
+    "data_user_captcha": "1"
 }
 
 def slugify_performer(name: str) -> str:
@@ -40,15 +53,21 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
     for url in urls_to_try:
         try:
             print(f"  Trying: {url}")
-            resp = await client.get(url, headers=HEADERS, follow_redirects=True, timeout=25.0)
+            resp = await client.get(
+                url,
+                headers=HEADERS,
+                cookies=COOKIES,
+                follow_redirects=True,
+                timeout=25.0
+            )
+
+            print(f"  → Status {resp.status_code}")
 
             if resp.status_code != 200:
-                print(f"  → Status {resp.status_code}")
                 continue
 
             tree = HTMLParser(resp.text)
 
-            # Look for any link that points to a scene
             for a in tree.css("a[href*='/scenes/']"):
                 href = a.attributes.get("href", "")
                 title = a.text(strip=True)
@@ -56,7 +75,6 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
                 if not title or len(title) < 5:
                     continue
 
-                # Skip obvious non-scene links
                 lower_title = title.lower()
                 if any(x in lower_title for x in ["next", "prev", "page", "more results", "all scenes", "show more"]):
                     continue
@@ -64,7 +82,6 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
                 scene_url = href if href.startswith("http") else DATA18_BASE + href
                 scene_id = href.rstrip("/").split("/")[-1]
 
-                # Try to detect the series/site
                 series = "Brazzers"
                 parent_text = ""
                 if a.parent:
@@ -84,7 +101,7 @@ async def fetch_performer_brazzers_scenes(performer: str, client: httpx.AsyncCli
                     SceneCandidate(
                         scene_id=scene_id,
                         title=title,
-                        date=None,          # we improve date later
+                        date=None,
                         series=series,
                         url=scene_url,
                         performers=[performer],
